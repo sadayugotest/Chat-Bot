@@ -290,6 +290,7 @@ def process_user_prompt(runtime: dict[str, object], user_prompt: str) -> None:
                     retriever=runtime["retriever"],
                     llm=runtime["llm"],
                     prompt=runtime["prompt"],
+                    known_records=runtime["known_records"],
                 )
             except Exception as exc:
                 answer = (

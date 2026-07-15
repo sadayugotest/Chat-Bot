@@ -6,7 +6,7 @@
 - ใช้ LangChain เป็น orchestration
 - ใช้ Chroma เป็น vector database
 - รองรับทั้งโหมด Terminal และ Web UI (Streamlit)
-- รองรับหลายไฟล์คู่มือในโฟลเดอร์เดียว
+- รองรับหลายไฟล์คู่มือในโฟลเดอร์เดียว (.txt และ .docx)
 
 ## Features
 
@@ -24,7 +24,7 @@
 - `rag_chat_local.py` : แกนหลัก RAG + โหมด Terminal
 - `web_chat_ui.py` : Web UI ด้วย Streamlit
 - `maintenance_log.txt` : ไฟล์คู่มือหลัก
-- `manuals/` : โฟลเดอร์คู่มือเพิ่มเติม (.txt)
+- `manuals/` : โฟลเดอร์คู่มือเพิ่มเติม (.txt, .docx)
 - `requirements.txt` : รายการ dependencies
 
 ## Prerequisites
@@ -73,6 +73,11 @@ streamlit run web_chat_ui.py
       2.ล้างน้ำ
 === END===
 ```
+
+หมายเหตุสำหรับไฟล์ Word (.docx):
+
+- รองรับไฟล์ `.docx` โดยตรง หากเนื้อหาในเอกสารยังอยู่ในรูปแบบเดียวกับด้านบน
+- แนะนำให้คง token สำคัญให้ตรงเดิม: `=== MACHINE: ... ===`, `[อาการ]`, `[สาเหตุ]`, `[การแก้ไข]`, `=== END===`
 
 ## Notes
 

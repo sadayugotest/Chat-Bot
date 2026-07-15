@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -34,11 +35,12 @@ from langchain_text_splitters import CharacterTextSplitter
 BASE_DIR = Path(__file__).resolve().parent
 MANUALS_DIR = BASE_DIR / "manuals"
 LEGACY_DATA_FILE = BASE_DIR / "maintenance_log.txt"
-MANUAL_FILE_EXTENSIONS = {".txt"}
+MANUAL_FILE_EXTENSIONS = {".txt", ".docx"}
 CHROMA_DIR = BASE_DIR / "chroma_db"
 INDEX_MANIFEST_FILE = CHROMA_DIR / "index_manifest.json"
 COLLECTION_NAME = "machine_maintenance_knowledge"
 INDEX_SCHEMA_VERSION = "v2_strict_record_split"
+NOT_FOUND_NOTICE = "ไม่มีในฐานข้อมูล โปรดตรวจสอบใหม่"
 
 # สามารถเปลี่ยนโมเดลผ่าน Environment Variable ได้
 # ตัวอย่าง:
@@ -68,7 +70,11 @@ def discover_manual_files() -> list[Path]:
 
     if MANUALS_DIR.exists() and MANUALS_DIR.is_dir():
         for path in sorted(MANUALS_DIR.iterdir()):
-            if path.is_file() and path.suffix.lower() in MANUAL_FILE_EXTENSIONS:
+            if (
+                path.is_file()
+                and path.suffix.lower() in MANUAL_FILE_EXTENSIONS
+                and not path.name.startswith("~$")
+            ):
                 manual_files.append(path)
 
     if LEGACY_DATA_FILE.exists() and LEGACY_DATA_FILE.is_file():
@@ -80,13 +86,46 @@ def discover_manual_files() -> list[Path]:
         return uniq
 
     raise FileNotFoundError(
-        f"ไม่พบไฟล์คู่มือ: กรุณาสร้างโฟลเดอร์ {MANUALS_DIR.name} และวางไฟล์ .txt หรือสร้าง {LEGACY_DATA_FILE.name}"
+        f"ไม่พบไฟล์คู่มือ: กรุณาสร้างโฟลเดอร์ {MANUALS_DIR.name} และวางไฟล์ .txt/.docx หรือสร้าง {LEGACY_DATA_FILE.name}"
     )
 
 
 def load_manual_text(file_path: Path) -> str:
-    """อ่านไฟล์คู่มือ/ประวัติซ่อมบำรุงแบบ text"""
-    return file_path.read_text(encoding="utf-8")
+    """อ่านไฟล์คู่มือ/ประวัติซ่อมบำรุง รองรับ .txt และ .docx"""
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".txt":
+        return file_path.read_text(encoding="utf-8")
+
+    if suffix == ".docx":
+        try:
+            docx_module = importlib.import_module("docx")
+            DocxDocument = getattr(docx_module, "Document")
+        except ImportError as exc:
+            raise RuntimeError(
+                "ยังไม่ได้ติดตั้ง python-docx กรุณารัน: pip install python-docx"
+            ) from exc
+
+        doc = DocxDocument(str(file_path))
+        lines: list[str] = []
+
+        # อ่านย่อหน้าในเอกสารตามลำดับ
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.rstrip()
+            if text:
+                lines.append(text)
+
+        # รองรับกรณีข้อมูลถูกเก็บในตาราง
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    if cell_text:
+                        lines.append(cell_text)
+
+        return "\n".join(lines)
+
+    raise ValueError(f"ยังไม่รองรับไฟล์นามสกุล: {file_path.suffix}")
 
 
 def split_by_machine_record(raw_text: str) -> list[str]:
@@ -287,12 +326,94 @@ def format_answer_from_record(record: dict[str, str]) -> str:
     )
 
 
+def normalize_for_match(text: str) -> str:
+    """normalize ข้อความสำหรับเทียบแบบไม่สนตัวพิมพ์และช่องว่าง"""
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
 def extract_alarm_code(text: str) -> Optional[str]:
     """ดึงรหัส Alarm จากคำถามผู้ใช้ เช่น Alarm 5567 -> 5567"""
     m = re.search(r"alarm\s*([A-Za-z0-9\-_/]+)", text, re.IGNORECASE)
     if not m:
         return None
     return m.group(1).strip().lower()
+
+
+def extract_machine_candidate(text: str) -> Optional[str]:
+    """
+    พยายามดึงชื่อเครื่องที่ผู้ใช้พิมพ์มาในคำถาม
+    รองรับรูปแบบ เช่น:
+    - BROTHER TC-S2A NC Alarm 5567
+    - เครื่อง BROTHER TC-S2A NC Alarm 5567
+    - MACHINE: BROTHER TC-S2A NC Alarm 5567
+    """
+    patterns = [
+        r"(?:machine|เครื่อง)\s*[:：]?\s*(.+?)(?=\s*alarm\b|$)",
+        r"^(.+?)(?=\s*alarm\b)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if not m:
+            continue
+        candidate = m.group(1).strip(" :-_\t\n")
+        candidate = re.sub(r"^(?:ของ|รุ่น|เครื่อง)\s+", "", candidate, flags=re.IGNORECASE)
+
+        # ต้องมีสาระพอ (ไม่ใช่คำทั่วไปสั้นๆ)
+        if len(re.sub(r"[^A-Za-z0-9]", "", candidate)) >= 3:
+            return candidate
+
+    return None
+
+
+def validate_question_against_catalog(question: str, known_records: list[dict[str, str]]) -> Optional[str]:
+    """
+    ตรวจสอบคำถามผู้ใช้กับฐานข้อมูลจริง
+    - ถ้าระบุ MACHINE แล้วไม่พบในฐานข้อมูล -> แจ้งไม่มีในฐานข้อมูล
+    - ถ้าระบุ Alarm แล้วไม่พบในฐานข้อมูล -> แจ้งไม่มีในฐานข้อมูล
+    - ถ้าระบุทั้งคู่ แต่คู่นั้นไม่มีจริง -> แจ้งไม่มีในฐานข้อมูล
+    """
+    if not known_records:
+        return None
+
+    known_machines = sorted(
+        {
+            record["machine"].strip()
+            for record in known_records
+            if record.get("machine") and record["machine"] != "ไม่พบข้อมูล"
+        }
+    )
+
+    alarm_to_machines: dict[str, set[str]] = {}
+    for record in known_records:
+        alarm_code = extract_alarm_code(record.get("symptom", ""))
+        machine = record.get("machine", "").strip()
+        if not alarm_code or not machine:
+            continue
+        if machine == "ไม่พบข้อมูล":
+            continue
+        alarm_to_machines.setdefault(alarm_code, set()).add(machine)
+
+    q_norm = normalize_for_match(question)
+    alarm_in_question = extract_alarm_code(question)
+    machine_candidate = extract_machine_candidate(question)
+
+    matched_machines_in_question = [
+        machine for machine in known_machines if normalize_for_match(machine) in q_norm
+    ]
+
+    if machine_candidate and not matched_machines_in_question:
+        return NOT_FOUND_NOTICE
+
+    if alarm_in_question and alarm_in_question not in alarm_to_machines:
+        return NOT_FOUND_NOTICE
+
+    if alarm_in_question and matched_machines_in_question:
+        machines_for_alarm = alarm_to_machines.get(alarm_in_question, set())
+        if not any(machine in machines_for_alarm for machine in matched_machines_in_question):
+            return NOT_FOUND_NOTICE
+
+    return None
 
 
 def find_exact_record_from_docs(question: str, docs: list[Document]) -> Optional[dict[str, str]]:
@@ -356,8 +477,14 @@ def answer_question(
     retriever,
     llm: ChatOllama,
     prompt: ChatPromptTemplate,
+    known_records: Optional[list[dict[str, str]]] = None,
 ) -> str:
     """ดึง context -> ให้ LLM ตอบ -> normalize ให้ตรง format บังคับ"""
+    if known_records:
+        invalid_message = validate_question_against_catalog(question=question, known_records=known_records)
+        if invalid_message:
+            return invalid_message
+
     docs = retriever.invoke(question)
 
     # ถ้าจับคู่ Alarm ได้แบบตรงตัว ให้ตอบจากข้อมูลต้นฉบับทันที
@@ -423,10 +550,17 @@ def initialize_rag_components() -> dict[str, object]:
     )
     prompt = build_prompt()
 
+    known_records = [
+        parse_record_from_text(doc.page_content)
+        for doc in all_docs
+        if doc.page_content.strip()
+    ]
+
     return {
         "retriever": retriever,
         "llm": llm,
         "prompt": prompt,
+        "known_records": known_records,
         "manual_files": manual_files,
         "index_needs_rebuild": index_needs_rebuild,
     }
@@ -439,6 +573,7 @@ def main() -> None:
     retriever = components["retriever"]
     llm = components["llm"]
     prompt = components["prompt"]
+    known_records = components["known_records"]
     manual_files = components["manual_files"]
     index_needs_rebuild = components["index_needs_rebuild"]
 
@@ -468,6 +603,7 @@ def main() -> None:
                 retriever=retriever,
                 llm=llm,
                 prompt=prompt,
+                known_records=known_records,
             )
             print(f"\n{answer}\n")
         except Exception as exc:
