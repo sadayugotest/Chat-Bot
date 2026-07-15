@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+venv11/
+
+# Chroma / local vector DB
+chroma_db/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Streamlit local config/cache (optional)
+.streamlit/secrets.toml
